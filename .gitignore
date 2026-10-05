@@ -1,0 +1,9 @@
+cache/
+.qh/
+example/
+qh.json
+__pycache__/
+*.pyc
+*.cpio.gz
+*.dtb
+*.log

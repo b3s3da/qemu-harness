@@ -1,0 +1,8 @@
+{
+  "kernel": "alpine:aarch64",
+  "mem": "512M",
+  "smp": 2,
+  "fs": ["fs"],
+  "pkgs": ["dropbear", "mosquitto", "mosquitto-clients", "curl", "busybox-extras"],
+  "fwd": ["2222:22", "1883:1883", "8080:80"]
+}

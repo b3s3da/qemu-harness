@@ -1,0 +1,11 @@
+* text=auto
+*.sh text eol=lf
+install.sh text eol=lf
+overlay/init text eol=lf
+*.go text eol=lf
+*.py text eol=lf
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+fs/** text eol=lf
+overlay/** text eol=lf
+skill/** text eol=lf

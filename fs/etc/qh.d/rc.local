@@ -1,0 +1,7 @@
+#!/bin/sh
+# IoT lab services. Each is optional: skipped when the binary isn't in the rootfs.
+mkdir -p /etc/dropbear /var/run /var/lib/mosquitto
+sed -i 's/^root:[^:]*:/root::/' /etc/shadow   # empty root password (lab VM)
+[ -x /usr/sbin/dropbear ] && dropbear -R -B -E -p 22 2>/dev/null && echo "qh: sshd (dropbear) on :22, root, empty password"
+[ -x /usr/sbin/mosquitto ] && { mosquitto -d -c /etc/mosquitto/mosquitto.conf >/tmp/mosquitto.log 2>&1; echo "qh: mosquitto on :1883"; }
+command -v busybox-extras >/dev/null && { busybox-extras httpd -h /www -p 80 && echo "qh: httpd on :80 (/www)"; }

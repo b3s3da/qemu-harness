@@ -1,0 +1,74 @@
+#!/bin/sh
+# qh early init (PID 1). Kernel cmdline knobs: qh.net=static|dhcp|none  qh.hostname=NAME  qh.init=/path (user hook)
+export PATH=/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+mount -t proc proc /proc
+mount -t sysfs sys /sys
+mount -t devtmpfs dev /dev 2>/dev/null || DEVNODES=mdev  # GKI has no devtmpfs: populate /dev from sysfs
+[ "$DEVNODES" = mdev ] && mdev -s
+mkdir -p /dev/pts /dev/shm /tmp /run /mnt
+mount -t devpts devpts /dev/pts 2>/dev/null
+[ -c /dev/net/tun ] || { mkdir -p /dev/net; mknod /dev/net/tun c 10 200; }
+mount -t tmpfs tmpfs /tmp
+mount -t tmpfs tmpfs /run
+mount -t debugfs none /sys/kernel/debug 2>/dev/null
+mount -t tracefs none /sys/kernel/tracing 2>/dev/null
+
+cmd=$(cat /proc/cmdline)
+opt() { for w in $cmd; do case $w in "$1="*) echo "${w#*=}"; return;; esac; done; }
+HN=$(opt qh.hostname); hostname "${HN:-qh}"
+NET=$(opt qh.net)
+
+# kernel modules: a full tree (lib/modules/<ver>/modules.dep) goes through modprobe, loose *.ko files are insmod'ed in order
+MODS=$(opt qh.mods)
+if [ -f "/lib/modules/$(uname -r)/modules.dep" ]; then
+  for m in $(echo "${MODS:-virtio_pci,virtio_mmio,virtio_console,virtio_net,virtio_blk,virtio_rng,9pnet_virtio,9p,tun}" | tr , ' '); do
+    modprobe "$m" 2>/dev/null
+  done
+elif [ -d /lib/modules ]; then
+  if [ -f /lib/modules/modules.order ]; then
+    while read m; do [ -f "/lib/modules/$m" ] && insmod "/lib/modules/$m" 2>&1; done < /lib/modules/modules.order
+  else
+    for m in /lib/modules/*.ko; do [ -f "$m" ] && insmod "$m" 2>&1; done
+  fi
+fi
+
+[ "$DEVNODES" = mdev ] && mdev -s
+
+# agent first: in tap mode it also creates eth0 (frames tunnelled to the host over the channel)
+CHAN=$(opt qh.chan); NIC=$(opt qh.nic)
+TAPARG=""; [ "$NIC" = tap ] && TAPARG="-tap eth0"
+( while true; do /usr/local/bin/qh-agent -chan "${CHAN:-auto}" $TAPARG; sleep 1; done ) &
+
+ip link set lo up
+if [ "$NET" != none ]; then
+  for i in $(seq 1 25); do [ -d /sys/class/net/eth0 ] && break; sleep 0.2; done
+  if [ -d /sys/class/net/eth0 ]; then
+    ip link set eth0 up
+    if [ "$NET" = dhcp ]; then
+      udhcpc -i eth0 -q -n -t 3 2>&1
+    else
+      ip addr add 10.0.2.15/24 dev eth0
+      ip route add default via 10.0.2.2
+      echo "nameserver 10.0.2.3" > /etc/resolv.conf
+    fi
+    echo "qh: net up: $(ip -4 -o addr show eth0 | awk '{print $4}')"
+  else
+    echo "qh: WARNING no eth0 (virtio_net missing?)"
+  fi
+fi
+
+# 9p/virtfs share from host (mount_tag=host) if driver available
+if grep -q 9p /proc/filesystems 2>/dev/null; then
+  mkdir -p /mnt/host; mount -t 9p -o trans=virtio,version=9p2000.L host /mnt/host 2>/dev/null && echo "qh: /mnt/host mounted"
+fi
+
+# user hooks
+[ -x /etc/qh.d/rc.local ] && /etc/qh.d/rc.local
+UI=$(opt qh.init); [ -n "$UI" ] && [ -x "$UI" ] && "$UI"
+
+echo "qh: ready (uptime $(cut -d' ' -f1 /proc/uptime)s)"
+# console shell on the serial tty; respawn
+while true; do
+  setsid sh -c 'exec sh </dev/console >/dev/console 2>&1' 
+  sleep 1
+done
