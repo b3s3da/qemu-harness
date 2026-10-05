@@ -12,19 +12,33 @@ Built for **IoT / embedded kernel emulation**: aarch64, arm32, riscv64 and x86_6
 
 ## Quick start
 
+**Windows - one line** (downloads the harness to `~	ools\qemu-harness`, offers to install Python / QEMU / Go via winget,
+builds the guest agent, adds `qh` to your PATH, installs the agent skill for Claude Code and Grok):
+
 ```powershell
-git clone <this repo> ; cd qemu-harness
-.\install.ps1            # Windows;  ./install.sh on Linux/macOS
+irm https://raw.githubusercontent.com/b3s3da/qemu-harness/main/install.ps1 | iex
+```
+
+Options (`-Yes` = never ask, `-Arch all`, `-Dir`, `-NoDeps`, `-NoPath`, `-NoSkills`, `-Smoke`):
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/b3s3da/qemu-harness/main/install.ps1))) -Yes -Arch all -Smoke
+```
+
+Piping a script into `iex` runs it unseen - if you prefer, clone the repo (or download `install.ps1`), read it, and run `.\install.ps1`.
+**Linux / macOS**: `git clone ... && ./install.sh` (needs Python 3, `qemu-system-*`, Go).
+
+Then, in any project folder (open a **new** terminal first so PATH is picked up):
+
+```powershell
 mkdir lab ; cd lab
-qh up --kernel alpine:aarch64          # or --kernel path\to\Image
+qh up --kernel alpine:aarch64          # or --kernel path	o\Image
 qh exec 'uname -a; ip -4 -o a show eth0'
 qh down
 ```
 
-The install script checks Python 3 / QEMU / Go, builds the guest agent, puts `qh` on your PATH and installs the agent skill into
-`~/.claude/skills` and `~/.grok/skills` (skip with `-NoSkills`, `-NoPath`; run a smoke test with `-Smoke`).
-
-Requirements: Python ≥ 3.8, QEMU (`qemu-system-<arch>` on PATH or `C:\Program Files\qemu`), Go ≥ 1.22 (for `qh setup`), internet for the first run.
+Requirements: Python >= 3.8, QEMU (`qemu-system-<arch>` on PATH or `C:\Program Files\qemu`), Go >= 1.22 (for `qh setup`), internet for the first run.
+The installer is idempotent: re-running it updates the harness in place and keeps `cache/`.
 
 ## Commands
 
