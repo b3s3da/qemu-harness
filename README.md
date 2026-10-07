@@ -49,7 +49,7 @@ The installer is idempotent: re-running it updates the harness in place and keep
 | `qh exec [--json] [--timeout N] [--bg] CMD…` | run in the guest; exit code propagated; `--cwd`, `-e K=V`, `--stdin`, `--argv` |
 | `qh put SRC DST` / `qh get SRC DST` | copy files or dirs (zlib on the wire; keep them small, see Performance) |
 | `qh reload [any VM option]` | rebuild rootfs and relaunch with the same ports; kernel/dtb/mem/cmdline may change |
-| `qh fwd HOST:GUEST` | add a host→guest TCP forward at runtime (`0` = pick a free host port) |
+| `qh fwd [udp:]HOST:GUEST` | add a host→guest TCP/UDP forward at runtime (`0` = pick a free host port) |
 | `qh logs [-f] [--tail N]` / `qh console --send CMD` | serial console log / talk to it |
 | `qh probe [--kernel K]` | what the kernel supports and which transports `qh` would pick |
 | `qh dtb -o m.dtb` | dump QEMU's generated device tree (packed), edit with `dtc`, feed back with `--dtb` |
@@ -97,6 +97,7 @@ the tunnel gives roughly 15 KB/s into the guest and 75 KB/s out — fine for scr
 
 * `agent did not respond`: `qh logs --tail 80`, then `qh probe`. A kernel with neither virtio-console nor 8250-PCI needs `--chan serial --chan-tty /dev/ttyXX`, or `--initrd X --no-wait` + `qh console`.
 * Git Bash rewrites `/tmp/x` arguments into Windows paths — set `MSYS_NO_PATHCONV=1`.
+* VMs outlive the launching command: QEMU and the daemon start with `CREATE_BREAKAWAY_FROM_JOB`, falling back to WMI `Win32_Process.Create` when the caller's Job Object forbids breakaway (agent runners / terminals that kill the process tree).
 * No flashing console windows: QEMU and the daemon start with `CREATE_NO_WINDOW`.
 * aarch64/arm/riscv64 run under TCG on x86 hosts (slow-ish but fine); on a matching host QEMU may use `--qemu-arg "-accel whpx"` / KVM.
 

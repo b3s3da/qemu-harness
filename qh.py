@@ -389,6 +389,7 @@ def run_daemon(name):
     """Owns the agent channel: multiplexes RPC from many CLI clients and tunnels ethernet frames
     between the guest tap and QEMU's slirp (netdev stream)."""
     import asyncio
+    sys.stdout = sys.stderr = open(os.path.join(sdir(name), "daemon.log"), "w", buffering=1)
     st = json.load(open(os.path.join(sdir(name), "state.json")))
     pending = {}
 
@@ -534,6 +535,47 @@ def cmd_build(a):
     print(f"built {out} ({n} entries, {os.path.getsize(out)//1024} KiB, {time.time()-t:.1f}s)")
 
 
+CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, CREATE_BREAKAWAY_FROM_JOB = 0x00000200, 0x08000000, 0x01000000
+
+
+class _Proc:
+    """Minimal Popen stand-in for processes started through WMI (no handle, only a pid)."""
+    def __init__(self, pid): self.pid = pid
+    def poll(self): return None if pid_alive(self.pid) else 0
+
+
+def _wmi_spawn(argv, cwd):
+    """Start a process via WMI Win32_Process.Create: its parent is the WMI service, so it is outside the caller's Job Object
+    (terminals/agent runners often wrap commands in a KILL_ON_JOB_CLOSE job that does not allow breakaway)."""
+    import base64 as b64
+    cl = subprocess.list2cmdline(argv)
+    ps = ("$si = New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly -Property @{ShowWindow=[uint16]0}; "
+          "$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{CommandLine=%s; CurrentDirectory=%s; ProcessStartupInformation=$si}; "
+          "if ($r.ReturnValue -ne 0) { exit 1 }; $r.ProcessId") % ("'" + cl.replace("'", "''") + "'", "'" + cwd.replace("'", "''") + "'")
+    enc = b64.b64encode(ps.encode("utf-16-le")).decode()
+    r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-EncodedCommand", enc], capture_output=True, text=True,
+                       creationflags=CREATE_NO_WINDOW)
+    if r.returncode or not r.stdout.strip().isdigit(): die("could not start process via WMI: " + (r.stderr or r.stdout)[-300:])
+    return _Proc(int(r.stdout.strip()))
+
+
+def spawn_detached(argv, logpath=None, cwd=None):
+    """Start a long-lived background process that survives this command (and its job/console) exiting."""
+    cwd = cwd or os.getcwd()
+    if os.name != "nt":
+        lf = open(logpath, "wb") if logpath else subprocess.DEVNULL
+        return subprocess.Popen(argv, cwd=cwd, stdout=lf, stderr=lf, stdin=subprocess.DEVNULL, close_fds=True, start_new_session=True)
+    base = CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
+    lf = open(logpath, "wb") if logpath else subprocess.DEVNULL
+    for extra in (CREATE_BREAKAWAY_FROM_JOB, None):
+        if extra is None: break
+        try:
+            return subprocess.Popen(argv, cwd=cwd, stdout=lf, stderr=lf, stdin=subprocess.DEVNULL, creationflags=base | extra, close_fds=True)
+        except OSError:  # the enclosing job forbids breakaway
+            pass
+    return _wmi_spawn(argv, cwd)  # output of the child is not captured on this path
+
+
 def build_qemu_cmd(a, cfg, name, d, ports, chan, nic, bus, hostfwd, initrd):
     kernel = cfg["kernel"]; log = os.path.join(d, "console.log")
     dev = "pci" if bus == "pci" else "device"
@@ -580,9 +622,11 @@ def launch(a, cfg, name, prev=None):
     ports = {k: (prev or {}).get(k) or free_port() for k in ("agent_port", "chan_port", "qmp_port", "serial_port")}
     ports["net_port"] = ((prev or {}).get("net_port") or free_port()) if nic == "tap" else 0
     hostfwd = []
-    for f in cfg["fwd"]:  # "2222:22" shorthand => tcp::2222-:22 ; host port 0 => auto
-        if ":" in f and not f.startswith(("tcp", "udp")):
-            h, g = f.split(":"); f = f"tcp::{h if h != '0' else free_port()}-:{g}"
+    for f in cfg["fwd"]:  # "2222:22" or "udp:1040:1040" shorthand => tcp::2222-:22 ; host port 0 => auto ; raw "tcp::2222-:22" passes through
+        if "::" not in f:
+            proto = "tcp"; parts = f.split(":")
+            if parts[0] in ("tcp", "udp"): proto = parts.pop(0)
+            h, g = parts; f = f"{proto}::{h if h != '0' else free_port()}-:{g}"
         hostfwd.append(f)
     initrd = cfg["initrd"]; tb = 0
     if not initrd:
@@ -593,18 +637,13 @@ def launch(a, cfg, name, prev=None):
         print(" ".join(f'"{x}"' if " " in x else x for x in q)); print(f"# arch={cfg['arch']} chan={chan} nic={nic} bus={bus}"); sys.exit(0)
     log = os.path.join(d, "console.log")
     if os.path.exists(log): os.remove(log)
-    flags = 0x00000200 | 0x08000000 if os.name == "nt" else 0  # NEW_GROUP | NO_WINDOW (not DETACHED)
-    with open(os.path.join(d, "qemu.log"), "wb") as lf:
-        p = subprocess.Popen(q, stdout=lf, stderr=lf, stdin=subprocess.DEVNULL, creationflags=flags, close_fds=True,
-                             start_new_session=(os.name != "nt"))
+    p = spawn_detached(q, os.path.join(d, "qemu.log"))
     if prev and pid_alive(prev.get("daemon_pid")): kill_pid(prev["daemon_pid"])
     st = dict(ports, name=name, pid=p.pid, arch=cfg["arch"], chan=chan, nic=nic, bus=bus, kernel=kernel, cmd=q, fwd=hostfwd,
               started=time.time(), fs=cfg["fs"], cfg={k: v for k, v in cfg.items() if not k.startswith("_")}, build_s=round(tb, 2))
     sp_ = os.path.join(d, "state.json")
     json.dump(st, open(sp_, "w"), indent=1)  # daemon reads this
-    dp = subprocess.Popen([sys.executable, os.path.abspath(__file__), "_daemon", name], cwd=os.getcwd(), stdin=subprocess.DEVNULL,
-                          stdout=open(os.path.join(d, "daemon.log"), "wb"), stderr=subprocess.STDOUT, creationflags=flags,
-                          close_fds=True, start_new_session=(os.name != "nt"))
+    dp = spawn_detached([sys.executable, os.path.abspath(__file__), "_daemon", name], os.path.join(d, "daemon.log"))
     st["daemon_pid"] = dp.pid
     json.dump(st, open(sp_, "w"), indent=1)
     return st, p
@@ -842,12 +881,16 @@ def cmd_qmp(a):
 
 
 def cmd_fwd(a):
-    s = load(a.name, True); h, g = a.spec.split(":")
-    hp = int(h) or free_port()
-    r = qmp(s, "human-monitor-command", **{"command-line": f"hostfwd_add u0 tcp::{hp}-:{g}"})
+    """HOST:GUEST or udp:HOST:GUEST (tcp is the default; HOST 0 = pick a free port)."""
+    s = load(a.name, True); parts = a.spec.split(":")
+    proto = "tcp"
+    if parts[0] in ("tcp", "udp"): proto = parts.pop(0)
+    if len(parts) != 2: die("usage: qh fwd [tcp|udp:]HOST:GUEST")
+    h, g = parts; hp = int(h) or free_port()
+    r = qmp(s, "human-monitor-command", **{"command-line": f"hostfwd_add u0 {proto}::{hp}-:{g}"})
     if r.get("return"): die(r["return"].strip())
-    s["fwd"].append(f"tcp::{hp}-:{g}"); json.dump(s, open(os.path.join(sdir(a.name), "state.json"), "w"), indent=1)
-    emit(a, {"host": f"127.0.0.1:{hp}", "guest_port": int(g)})
+    s["fwd"].append(f"{proto}::{hp}-:{g}"); json.dump(s, open(os.path.join(sdir(a.name), "state.json"), "w"), indent=1)
+    emit(a, {"host": f"127.0.0.1:{hp}", "guest_port": int(g), "proto": proto})
 
 
 def emit(a, obj):

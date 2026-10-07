@@ -17,7 +17,8 @@ Loop:
    `qh up --dry-run` prints the QEMU command; `qh probe --kernel K` shows detected features/transports; `qh dtb -o m.dtb` dumps QEMU's device tree.
 5. Kernel problems: `qh logs --tail 80` (serial console), `qh console --send 'dmesg|tail'`.
 6. Services in the default overlay: ssh `-p 2222 root@127.0.0.1` (empty password), MQTT 127.0.0.1:1883, HTTP 127.0.0.1:8080; more via `qh fwd HOST:GUEST`.
-7. `qh down` when finished; `qh ls`; `-n NAME` for several VMs.
+7. `qh up` returns once the VM is ready and the VM keeps running after the command (and its job/terminal) exits: no keep-alive loop or background task is needed. `qh fwd [udp:]HOST:GUEST` adds TCP/UDP forwards.
+8. `qh down` when finished; `qh ls`; `-n NAME` for several VMs.
 
 Transport is chosen automatically from the kernel's config: virtio-console + virtio-net when available (fast), otherwise the agent
 rides a PCI/spare UART and the network is tunnelled (stock Android GKI: ~15 KB/s into the guest). Override with `--chan/--nic/--bus`.
