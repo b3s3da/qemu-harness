@@ -51,6 +51,7 @@ The installer is idempotent: re-running it updates the harness in place and keep
 | `qh reload [any VM option]` | rebuild rootfs and relaunch with the same ports; kernel/dtb/mem/cmdline may change |
 | `qh fwd [udp:]HOST:GUEST` | add a host→guest TCP/UDP forward at runtime (`0` = pick a free host port) |
 | `qh logs [-f] [--tail N]` / `qh console --send CMD` | serial console log / talk to it |
+| `qh elf FILE` / `qh elf --guest PATH` | ELF ABI, flags and loader (why a binary will not execve) |
 | `qh probe [--kernel K]` | what the kernel supports and which transports `qh` would pick |
 | `qh dtb -o m.dtb` | dump QEMU's generated device tree (packed), edit with `dtc`, feed back with `--dtb` |
 | `qh kernel fetch ARCH [virt\|lts]` | download an Alpine kernel + virtio/tun/9p modules |
@@ -113,6 +114,13 @@ the tunnel gives roughly 15 KB/s into the guest and 75 KB/s out — fine for scr
 ## Troubleshooting
 
 * `agent did not respond`: `qh logs --tail 80`, then `qh probe`. A kernel with neither virtio-console nor 8250-PCI needs `--chan serial --chan-tty /dev/ttyXX`, or `--initrd X --no-wait` + `qh console`.
+* **A firmware binary fails with `syntax error: unexpected "("` or `Exec format error`**: the kernel refused to execve it (busybox `ash` then tries to read the ELF as a script).
+  Run `qh elf <file>` (or `qh elf --guest /path`) to see class/endianness/MIPS ISA level/NaN2008/loader. Typical causes: R6 or NaN2008 binary on an R2 kernel/CPU, wrong
+  endianness, or a missing loader path. Foreign libc (e.g. uClibc firmware on the musl OpenWrt base): keep its `/lib` in its own dir and run it through its loader with
+  `qh exec --ld /opt/fw/lib/ld-uClibc.so.0 --libpath /opt/fw/lib /opt/fw/bin/app` (no shell involved). `qh exec --argv CMD ARGS...` also skips the shell.
+* **Host ports**: forwards bind to `127.0.0.1` only. A busy host port (or `0`) is replaced by a free one with a warning, and the final mapping is printed in `forwards`
+  (and `qh ls --json`), so a leftover VM can never make QEMU die with `Could not set up host forwarding rule`.
+* Config comes from `./qh.json` (else the shipped `qh.example.json`); run `qh` from the project folder that holds your `qh.json` and `fs/`.
 * Git Bash rewrites `/tmp/x` arguments into Windows paths — set `MSYS_NO_PATHCONV=1`.
 * VMs outlive the launching command: QEMU and the daemon start with `CREATE_BREAKAWAY_FROM_JOB`, falling back to WMI `Win32_Process.Create` when the caller's Job Object forbids breakaway (agent runners / terminals that kill the process tree).
 * No flashing console windows: QEMU and the daemon start with `CREATE_NO_WINDOW`.

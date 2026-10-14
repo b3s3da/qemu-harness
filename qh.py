@@ -88,7 +88,7 @@ def load_cfg(args, base_cfg=None):
     if base_cfg is not None:
         cfg.update(base_cfg); base = os.getcwd()
     else:
-        for p in (os.path.join(os.getcwd(), "qh.json"), os.path.join(ROOT, "qh.json"), os.path.join(ROOT, "qh.example.json")):
+        for p in (os.path.join(os.getcwd(), "qh.json"), os.path.join(ROOT, "qh.example.json")):
             if os.path.exists(p):
                 with open(p) as f: cfg.update(json.load(f))
                 cfg["_base"] = os.path.dirname(p); break
@@ -291,7 +291,8 @@ def _newc(out, ino, name, mode, data=b"", nlink=1, rdev=(0, 0)):
 def build_initramfs(dest, fs_dirs, extra_files=None, pkgs=(), comp="gzip"):
     """Alpine base tar + project overlay + user fs dirs (later wins) -> cpio.gz."""
     tarp = base_tar(); agent = os.path.join(CACHE, "qh-agent")
-    if pkgs and ARCH.get("userland") == "openwrt": die("`pkgs` resolves Alpine packages; for OpenWrt userlands put files in an fs/ dir instead")
+    if pkgs and ARCH.get("userland") == "openwrt":
+        print("qh: warning: `pkgs` are Alpine packages and are ignored for OpenWrt userlands (mips/mipsel); put files in an fs/ dir", file=sys.stderr); pkgs = ()
     if not (os.path.exists(tarp) and os.path.exists(agent)): die("run `qh setup` first")
     ents = {}  # path -> (mode, data)
     with tarfile.open(tarp) as t:
@@ -610,7 +611,7 @@ def _wmi_spawn(argv, cwd):
           "$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{CommandLine=%s; CurrentDirectory=%s; ProcessStartupInformation=$si}; "
           "if ($r.ReturnValue -ne 0) { exit 1 }; $r.ProcessId") % ("'" + cl.replace("'", "''") + "'", "'" + cwd.replace("'", "''") + "'")
     enc = b64.b64encode(ps.encode("utf-16-le")).decode()
-    r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-EncodedCommand", enc], capture_output=True, text=True,
+    r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-EncodedCommand", enc], capture_output=True, encoding="utf-8", errors="replace",
                        creationflags=CREATE_NO_WINDOW)
     if r.returncode or not r.stdout.strip().isdigit(): die("could not start process via WMI: " + (r.stderr or r.stdout)[-300:])
     return _Proc(int(r.stdout.strip()))
@@ -631,6 +632,44 @@ def spawn_detached(argv, logpath=None, cwd=None):
         except OSError:  # the enclosing job forbids breakaway
             pass
     return _wmi_spawn(argv, cwd)  # output of the child is not captured on this path
+
+
+def port_busy(proto, port):
+    """True when something already uses this host port (checked as a client, plus a loopback bind attempt)."""
+    if proto == "udp":
+        u = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try: u.bind(("127.0.0.1", port)); return False
+        except OSError: return True
+        finally: u.close()
+    c = socket.socket(); c.settimeout(0.3)
+    try: c.connect(("127.0.0.1", port)); return True
+    except OSError: pass
+    finally: c.close()
+    b = socket.socket()
+    try: b.bind(("127.0.0.1", port)); return False
+    except OSError: return True
+    finally: b.close()
+
+
+def resolve_fwd(specs):
+    """'2222:22' | 'udp:1040:1040' | 'tcp:127.0.0.1:2222-:22' -> QEMU hostfwd strings bound to 127.0.0.1 only.
+    Host port 0 or a busy port is replaced by a free one (with a warning), so a stale VM can't make QEMU die at startup."""
+    out = []
+    for f in specs:
+        m = re.match(r"^(tcp|udp):([^:]*):(\d*)-([^:]*):(\d+)$", f)
+        if m: proto, addr, hp, gaddr, gp = m.groups()
+        else:
+            parts = f.split(":"); proto = "tcp"
+            if parts[0] in ("tcp", "udp"): proto = parts.pop(0)
+            if len(parts) != 2: die(f"bad forward '{f}' (use HOST:GUEST, udp:HOST:GUEST or tcp:ADDR:HOST-:GUEST)")
+            (hp, gp), addr, gaddr = parts, "", ""
+        hp = int(hp or 0)
+        if hp == 0 or port_busy(proto, hp):
+            new = free_port()
+            if hp: print(f"qh: warning: host {proto} port {hp} is busy, forwarding {new} -> guest {gp} instead", file=sys.stderr)
+            hp = new
+        out.append(f"{proto}:{addr or '127.0.0.1'}:{hp}-{gaddr}:{gp}")
+    return out
 
 
 def build_qemu_cmd(a, cfg, name, d, ports, chan, nic, bus, hostfwd, initrd):
@@ -681,13 +720,7 @@ def launch(a, cfg, name, prev=None):
     kcfg = kernel_config(kernel); chan, nic, bus = pick_transport(cfg, kcfg)
     ports = {k: (prev or {}).get(k) or free_port() for k in ("agent_port", "chan_port", "qmp_port", "serial_port")}
     ports["net_port"] = ((prev or {}).get("net_port") or free_port()) if nic == "tap" else 0
-    hostfwd = []
-    for f in cfg["fwd"]:  # "2222:22" or "udp:1040:1040" shorthand => tcp::2222-:22 ; host port 0 => auto ; raw "tcp::2222-:22" passes through
-        if "::" not in f:
-            proto = "tcp"; parts = f.split(":")
-            if parts[0] in ("tcp", "udp"): proto = parts.pop(0)
-            h, g = parts; f = f"{proto}::{h if h != '0' else free_port()}-:{g}"
-        hostfwd.append(f)
+    hostfwd = resolve_fwd(cfg["fwd"])
     initrd = cfg["initrd"]; tb = 0
     if not initrd:
         initrd = os.path.join(d, "rootfs.cpio.gz")
@@ -720,7 +753,14 @@ def wait_agent(st, p, timeout):
     t0 = time.time(); log = os.path.join(sdir(st["name"]), "console.log")
     while time.time() - t0 < timeout:
         if p is not None and p.poll() is not None or not pid_alive(st["pid"]):
-            tail = open(os.path.join(sdir(st["name"]), "qemu.log"), errors="replace").read()[-1500:]
+            lp = os.path.join(sdir(st["name"]), "qemu.log")
+            tail = open(lp, errors="replace").read()[-1500:] if os.path.exists(lp) else ""
+            if not tail.strip() and st.get("cmd"):  # started via WMI: output was not captured, reproduce it
+                try:
+                    r = subprocess.run(st["cmd"], capture_output=True, encoding="utf-8", errors="replace", timeout=8,
+                                       creationflags=0x08000000 if os.name == "nt" else 0)
+                    tail = (r.stderr or r.stdout or "")[-1500:] or f"(re-run exited with code {r.returncode} and no output)"
+                except subprocess.TimeoutExpired: tail = "(a re-run started fine, so the first start died for another reason; see .qh/<name>/console.log)"
             die("qemu exited early:\n" + tail)
         try:
             ag = Agent(st["agent_port"], 2)
@@ -801,7 +841,7 @@ def cmd_dtb(a):
     """Dump the device tree QEMU generates for the machine (edit with dtc, feed back with --dtb)."""
     cfg = load_cfg(a); out = os.path.abspath(a.out)
     q = [qemu_bin(), "-M", f"{cfg['machine']},dumpdtb={out}"] + (["-cpu", cfg["cpu"]] if cfg["cpu"] else []) + ["-m", cfg["mem"], "-smp", str(cfg["smp"]), "-display", "none", "-serial", "null"]
-    r = subprocess.run(q, capture_output=True, text=True, creationflags=0x08000000 if os.name == "nt" else 0)
+    r = subprocess.run(q, capture_output=True, encoding="utf-8", errors="replace", creationflags=0x08000000 if os.name == "nt" else 0)
     if not os.path.exists(out): die("dumpdtb failed (machine without a DTB?):\n" + r.stderr[-600:])
     d = open(out, "rb").read()  # QEMU dumps a padded 1 MiB buffer: repack to the real size
     (magic, total, off_st, off_str, off_rsv, ver, lcv, bcpu, sz_str, sz_st) = struct.unpack(">10I", d[:40])
@@ -824,12 +864,61 @@ def cmd_ls(a):
     emit(a, rows)
 
 
+_EM = {3: "x86", 8: "MIPS", 20: "PowerPC", 40: "ARM", 62: "x86-64", 183: "AArch64", 243: "RISC-V"}
+_MIPS_ARCH = {0: "mips1", 1: "mips2", 2: "mips3", 3: "mips4", 4: "mips5", 5: "mips32", 6: "mips64", 7: "mips32r2", 8: "mips64r2", 9: "mips32r6", 10: "mips64r6"}
+
+
+def elf_info(d):
+    if d[:4] != b"\x7fELF": die("not an ELF file")
+    e64 = d[4] == 2; en = "<" if d[5] == 1 else ">"
+    et, em = struct.unpack_from(en + "HH", d, 16)
+    if e64:
+        phoff = struct.unpack_from(en + "Q", d, 32)[0]; flags = struct.unpack_from(en + "I", d, 48)[0]; phes, phn = struct.unpack_from(en + "HH", d, 54)
+    else:
+        phoff = struct.unpack_from(en + "I", d, 28)[0]; flags = struct.unpack_from(en + "I", d, 36)[0]; phes, phn = struct.unpack_from(en + "HH", d, 42)
+    interp = None
+    for i in range(phn):
+        o = phoff + i * phes
+        if o + phes > len(d): break
+        if struct.unpack_from(en + "I", d, o)[0] == 3:  # PT_INTERP
+            if e64: off, sz = struct.unpack_from(en + "Q", d, o + 8)[0], struct.unpack_from(en + "Q", d, o + 32)[0]
+            else: off, sz = struct.unpack_from(en + "I", d, o + 4)[0], struct.unpack_from(en + "I", d, o + 16)[0]
+            interp = d[off:off + sz].split(bytes(1))[0].decode(errors="replace") if off + sz <= len(d) else "(beyond the bytes read)"
+    info = {"class": 64 if e64 else 32, "endian": "little" if en == "<" else "big", "type": {2: "EXEC", 3: "DYN"}.get(et, et),
+            "machine": _EM.get(em, em), "e_flags": hex(flags), "interpreter": interp}
+    hints = []
+    if em == 8:
+        arch = _MIPS_ARCH.get((flags >> 28) & 0xF, "?"); abi = flags & 0xF000
+        info.update(mips_arch=arch, mips_abi={0x1000: "o32", 0x2000: "o64", 0x3000: "eabi32", 0x4000: "eabi64"}.get(abi, "n32" if flags & 0x20 else "unknown"),
+                    nan2008=bool(flags & 0x400), micromips=bool(flags & 0x2000000), mips16=bool(flags & 0x4000000))
+        if arch.endswith("r6"): hints.append("MIPS R6 binary: needs an R6 CPU *and* kernel; the OpenWrt malta kernel is R2 -> ENOEXEC")
+        if info["nan2008"]: hints.append("NaN2008 binary: the CPU must advertise NaN2008 (R6 or a -cpu that supports it), else execve says 'Exec format error'")
+        if info["micromips"]: hints.append("microMIPS code needs a CPU model with microMIPS (malta 24K/34K do not have it)")
+        if info["mips_abi"] not in ("o32",): hints.append("only the o32 ABI runs on the mips/mipsel (32-bit) targets")
+    if interp: hints.append(f"needs {interp} at exactly that path; if it clashes with the guest libc ship it in its own dir and run: qh exec --ld <dir>/<loader> --libpath <dir> <bin>")
+    info["hints"] = hints
+    return info
+
+
+def cmd_elf(a):
+    """Why does a binary fail with 'syntax error: unexpected (' / 'Exec format error'? Show its ELF ABI, flags and loader."""
+    if a.guest:
+        s = load(a.name, True); ag = agent_for(s)
+        r = ag.call(op="get", path=a.path, offset=0, len=65536); ag.close()
+        if not r.get("ok"): die(r.get("error", "get failed"))
+        d = b64d(r["data"])
+    else: d = open(a.path, "rb").read(65536)
+    emit(a, elf_info(d))
+
+
 def cmd_exec(a):
     s = load(a.name, True); ag = agent_for(s)
     req = {"op": "exec", "timeout": a.timeout}
     if a.bg: req["bg"] = True
     if a.cwd: req["cwd"] = a.cwd
     if a.env: req["env"] = dict(e.split("=", 1) for e in a.env)
+    if a.ld:  # run a foreign-libc binary through its own dynamic loader: LOADER [--library-path DIR] CMD...
+        a.argv = True; a.cmd = [a.ld] + (["--library-path", a.libpath] if a.libpath else []) + a.cmd
     if a.argv: req["argv"] = a.cmd
     else: req["cmd"] = " ".join(a.cmd)
     if a.stdin:
@@ -946,10 +1035,12 @@ def cmd_fwd(a):
     proto = "tcp"
     if parts[0] in ("tcp", "udp"): proto = parts.pop(0)
     if len(parts) != 2: die("usage: qh fwd [tcp|udp:]HOST:GUEST")
-    h, g = parts; hp = int(h) or free_port()
-    r = qmp(s, "human-monitor-command", **{"command-line": f"hostfwd_add u0 {proto}::{hp}-:{g}"})
+    h, g = parts; hp = int(h)
+    if hp and port_busy(proto, hp): die(f"host {proto} port {hp} is already in use (use 0 for a free port)")
+    hp = hp or free_port()
+    r = qmp(s, "human-monitor-command", **{"command-line": f"hostfwd_add u0 {proto}:127.0.0.1:{hp}-:{g}"})
     if r.get("return"): die(r["return"].strip())
-    s["fwd"].append(f"{proto}::{hp}-:{g}"); json.dump(s, open(os.path.join(sdir(a.name), "state.json"), "w"), indent=1)
+    s["fwd"].append(f"{proto}:127.0.0.1:{hp}-:{g}"); json.dump(s, open(os.path.join(sdir(a.name), "state.json"), "w"), indent=1)
     emit(a, {"host": f"127.0.0.1:{hp}", "guest_port": int(g), "proto": proto})
 
 
@@ -968,7 +1059,7 @@ def main():
         if name: q.add_argument("-n", "--name", default=None)
         return q
     def vm_opts(q):
-        q.add_argument("--arch", help="aarch64|arm|riscv64|x86_64 (default: detected from the kernel image)")
+        q.add_argument("--arch", help="|".join(ARCHES) + " (default: detected from the kernel image)")
         q.add_argument("--kernel", help="kernel file, or alpine:<arch>[:flavor] to use a fetched Alpine kernel + modules")
         q.add_argument("--initrd", help="your own initrd instead of the built rootfs (no agent unless it contains one; use --no-wait)")
         q.add_argument("--bios"); q.add_argument("--chan", choices=["auto", "virtio", "pci-serial", "serial"]); q.add_argument("--nic", help="auto|native (virtio)|tap|none|<qemu NIC model, e.g. pcnet, e1000>")
@@ -980,7 +1071,7 @@ def main():
         q.add_argument("--fwd", action="append", help="host:guest tcp forward, e.g. 8080:80 (0=auto host port)")
         q.add_argument("--disk"); q.add_argument("--dtb"); q.add_argument("--timeout", type=float, default=90)
     q = sp("setup", cmd_setup, "download userland, build agent", name=False); q.add_argument("--force", action="store_true")
-    q.add_argument("--arch", default="aarch64", help="aarch64|arm|riscv64|x86_64|all")
+    q.add_argument("--arch", default="aarch64", help="|".join(ARCHES) + "|all")
     q = sp("probe", cmd_probe, "show kernel features and chosen transports", name=False); vm_opts(q)
     q = sp("kernel", cmd_kernel, "fetch an Alpine kernel (+virtio modules) for an arch", name=False); q.add_argument("action", choices=["fetch"])
     q.add_argument("arch"); q.add_argument("flavor", nargs="?"); q.add_argument("--force", action="store_true")
@@ -995,6 +1086,9 @@ def main():
     q = sp("exec", cmd_exec, "run command in guest"); q.add_argument("--timeout", type=float, default=60); q.add_argument("--bg", action="store_true")
     q.add_argument("--cwd"); q.add_argument("-e", "--env", action="append"); q.add_argument("--argv", action="store_true", help="no shell, exec argv directly")
     q.add_argument("--stdin", action="store_true"); q.add_argument("cmd", nargs=argparse.REMAINDER)
+    q.add_argument("--ld", help="dynamic loader inside the guest to run the command through (foreign-libc firmware binaries)")
+    q.add_argument("--libpath", help="with --ld: value for --library-path")
+    q = sp("elf", cmd_elf, "inspect an ELF (host file, or --guest path): ABI, flags, loader, why execve fails"); q.add_argument("path"); q.add_argument("--guest", action="store_true")
     q = sp("put", cmd_put, "host -> guest"); q.add_argument("src"); q.add_argument("dst")
     q = sp("get", cmd_get, "guest -> host"); q.add_argument("src"); q.add_argument("dst")
     q = sp("logs", cmd_logs, "serial console log"); q.add_argument("-f", "--follow", action="store_true"); q.add_argument("--tail", type=int)
