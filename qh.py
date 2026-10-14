@@ -33,12 +33,16 @@ ARCHES = {
     "x86_64":  dict(qemu="qemu-system-x86_64", alpine="x86_64", goarch="amd64", machine="q35", cpu="max", kflavor="virt",
                     cmdline="console=ttyS0", chan_tty=None),
 }
-ALIASES = {"arm64": "aarch64", "armv8": "aarch64", "arm32": "arm", "armv7": "arm", "armhf": "arm", "riscv": "riscv64",
+_MIPS = dict(alpine=None, userland="openwrt", machine="malta", cpu=None, kflavor=None, cmdline="console=ttyS0", chan_tty="/dev/ttyS1",
+             chan_default="serial", nic_default="pcnet", nic_mods="mii,pcnet32", smp=1, mem="256M", gomips="softfloat", rd_comp="none")
+ARCHES["mipsel"] = dict(_MIPS, qemu="qemu-system-mipsel", goarch="mipsle", owrt="malta/le")
+ARCHES["mips"] = dict(_MIPS, qemu="qemu-system-mips", goarch="mips", owrt="malta/be")
+ALIASES = {"mipsle": "mipsel", "mips32el": "mipsel", "mipsbe": "mips", "mips32": "mips", "arm64": "aarch64", "armv8": "aarch64", "arm32": "arm", "armv7": "arm", "armhf": "arm", "riscv": "riscv64",
            "amd64": "x86_64", "x64": "x86_64", "x86": "x86_64"}
 ARCH = dict(ARCHES["aarch64"], name="aarch64")
-DEFAULT_CFG = {"arch": None, "kernel": None, "mem": "512M", "smp": 2, "machine": None, "cpu": None, "fs": [], "pkgs": [],
+DEFAULT_CFG = {"arch": None, "kernel": None, "mem": None, "smp": None, "machine": None, "cpu": None, "fs": [], "pkgs": [],
                "fwd": ["tcp::2222-:22"], "append": "", "net": "static", "disk": None, "dtb": None, "initrd": None, "bios": None,
-               "chan": "auto", "nic": "auto", "bus": "auto", "chan_tty": None}
+               "chan": "auto", "nic": "auto", "bus": "auto", "chan_tty": None, "initrd_comp": None}
 
 
 def norm_arch(x):
@@ -68,7 +72,9 @@ def detect_arch(path):
     if d[0x38:0x3c] == b"RSC\x05": return "riscv64"
     if d[0x202:0x206] == b"HdrS": return "x86_64"
     if d[:4] == b"\x7fELF":
-        return {183: "aarch64", 40: "arm", 243: "riscv64", 62: "x86_64"}.get(struct.unpack_from("<H", d, 18)[0])
+        em = struct.unpack_from("<H" if d[5] == 1 else ">H", d, 18)[0]
+        if em == 8: return "mipsel" if d[5] == 1 else "mips"
+        return {183: "aarch64", 40: "arm", 243: "riscv64", 62: "x86_64"}.get(em)
     return None
 
 
@@ -87,31 +93,35 @@ def load_cfg(args, base_cfg=None):
                 with open(p) as f: cfg.update(json.load(f))
                 cfg["_base"] = os.path.dirname(p); break
         base = cfg.get("_base", os.getcwd())
-    for k in ("arch", "kernel", "mem", "smp", "machine", "cpu", "append", "net", "disk", "dtb", "initrd", "bios", "chan", "nic", "bus", "chan_tty"):
+    for k in ("arch", "kernel", "mem", "smp", "machine", "cpu", "append", "net", "disk", "dtb", "initrd", "bios", "chan", "nic", "bus", "chan_tty", "initrd_comp"):
         v = getattr(args, k, None)
         if v is not None: cfg[k] = v
     if getattr(args, "pkg", None): cfg["pkgs"] = list(cfg["pkgs"]) + args.pkg
     if getattr(args, "fs", None): cfg["fs"] = list(cfg["fs"]) + [os.path.abspath(d) for d in args.fs]
     if getattr(args, "fwd", None): cfg["fwd"] = args.fwd
     for k in ("kernel", "disk", "dtb", "initrd", "bios"):
-        if cfg[k] and not str(cfg[k]).startswith("alpine:") and not os.path.isabs(cfg[k]): cfg[k] = os.path.join(base, cfg[k])
+        if cfg[k] and not str(cfg[k]).startswith(("alpine:", "openwrt:")) and not os.path.isabs(cfg[k]): cfg[k] = os.path.join(base, cfg[k])
     cfg["fs"] = [d if os.path.isabs(d) else os.path.join(base, d) for d in cfg["fs"]]
     # kernel spec "alpine:ARCH[:flavor]" -> fetched Alpine kernel + its virtio modules
     k = cfg["kernel"]
-    if k and k.startswith("alpine:"):
+    if k and k.startswith(("alpine:", "openwrt:")):
         parts = k.split(":")
         arch = norm_arch(parts[1] if len(parts) > 1 and parts[1] else (cfg["arch"] or "aarch64"))
         cfg["arch"] = arch; use_arch(arch)
-        kp, modfs = kernel_fetch(arch, parts[2] if len(parts) > 2 else None)
+        kp, modfs = kernel_fetch(arch, parts[2] if len(parts) > 2 else None, vendor=parts[0])
         cfg["kernel"] = kp
-        if modfs not in cfg["fs"]: cfg["fs"].append(modfs)
-        cfg["_mods"] = True
+        if modfs:
+            if modfs not in cfg["fs"]: cfg["fs"].append(modfs)
+            cfg["_mods"] = True
     if cfg["kernel"] and not cfg["arch"]:
         if not os.path.exists(cfg["kernel"]): die(f"kernel not found: {cfg['kernel']}")
         cfg["arch"] = detect_arch(cfg["kernel"]) or "aarch64"
     cfg["arch"] = norm_arch(cfg["arch"] or "aarch64"); use_arch(cfg["arch"])
     for k2 in ("machine", "cpu", "chan_tty"):
         if cfg[k2] is None: cfg[k2] = ARCH.get(k2)
+    if cfg["initrd_comp"] is None: cfg["initrd_comp"] = ARCH.get("rd_comp", "gzip")
+    if cfg["mem"] is None: cfg["mem"] = ARCH.get("mem", "512M")
+    if cfg["smp"] is None: cfg["smp"] = ARCH.get("smp", 2)
     cfg["_mods"] = cfg.get("_mods") or any(os.path.isdir(os.path.join(d, "lib", "modules")) for d in cfg["fs"])
     return cfg
 
@@ -128,10 +138,37 @@ def qemu_bin(name=None):
 
 
 # ---------------------------------------------------------------- setup / rootfs
+OWRT = "https://downloads.openwrt.org/releases/"
+
+
+def base_tar():
+    return os.path.join(CACHE, "openwrt-rootfs.tar.gz" if ARCH.get("userland") == "openwrt" else "alpine-minirootfs.tar.gz")
+
+
+def owrt_info(force=False):
+    """Resolve (and pin, so kernel and rootfs modules always match) the latest OpenWrt release files for this arch."""
+    f = os.path.join(CACHE, "openwrt.json")
+    if os.path.exists(f) and not force: return json.load(open(f))
+    idx = urllib.request.urlopen(OWRT).read().decode()
+    vers = sorted(set(re.findall(r'href="(\d+\.\d+\.\d+)/"', idx)), key=lambda v: tuple(map(int, v.split("."))))
+    base = f"{OWRT}{vers[-1]}/targets/{ARCH['owrt']}/"
+    lst = urllib.request.urlopen(base).read().decode()
+    rootfs = re.findall(r'href="(openwrt-[^"/]*-default-rootfs\.tar\.gz)"', lst) or re.findall(r'href="(openwrt-[^"/]*-rootfs\.tar\.gz)"', lst)
+    # the -initramfs build has BLK_DEV_INITRD, so our external rootfs is unpacked on top of the built-in one
+    kern = re.findall(r'href="(openwrt-[^"/]*-vmlinux-initramfs\.elf)"', lst) or re.findall(r'href="(openwrt-[^"/]*-vmlinux\.elf)"', lst)
+    if not rootfs or not kern: die(f"OpenWrt {vers[-1]} {ARCH['owrt']}: rootfs/vmlinux not found at {base}")
+    info = dict(version=vers[-1], base=base, rootfs=rootfs[0], kernel=kern[0]); json.dump(info, open(f, "w"))
+    return info
+
+
 def ensure_setup(arch, force=False):
     use_arch(arch)
-    tarp = os.path.join(CACHE, "alpine-minirootfs.tar.gz"); rel = ALPINE_BASE + f"latest-stable/releases/{ARCH['alpine']}/"
-    if not os.path.exists(tarp) or force:
+    tarp = base_tar()
+    if ARCH.get("userland") == "openwrt":
+        if not os.path.exists(tarp) or force:
+            i = owrt_info(force); print("downloading", i["rootfs"], file=sys.stderr); urllib.request.urlretrieve(i["base"] + i["rootfs"], tarp)
+    elif not os.path.exists(tarp) or force:
+        rel = ALPINE_BASE + f"latest-stable/releases/{ARCH['alpine']}/"
         idx = urllib.request.urlopen(rel).read().decode()
         names = sorted(set(re.findall(r'href="(alpine-minirootfs-\d+\.\d+\.\d+-' + ARCH["alpine"] + r'\.tar\.gz)"', idx)))
         if not names: die(f"no alpine minirootfs found for {ARCH['alpine']}")
@@ -141,6 +178,7 @@ def ensure_setup(arch, force=False):
     if force or not os.path.exists(agent) or os.path.getmtime(agent) < max(os.path.getmtime(x) for x in srcs):
         env = dict(os.environ, GOOS="linux", GOARCH=ARCH["goarch"], CGO_ENABLED="0")
         if ARCH.get("goarm"): env["GOARM"] = ARCH["goarm"]
+        if ARCH.get("gomips"): env["GOMIPS"] = ARCH["gomips"]
         print(f"building guest agent ({ARCH['goarch']})", file=sys.stderr)
         r = subprocess.run(["go", "build", "-ldflags=-s -w", "-o", agent, "."], cwd=os.path.join(ROOT, "agent"), env=env)
         if r.returncode: die("go build failed")
@@ -250,9 +288,10 @@ def _newc(out, ino, name, mode, data=b"", nlink=1, rdev=(0, 0)):
     out.write(data); out.write(b"\0" * ((4 - len(data) % 4) % 4))
 
 
-def build_initramfs(dest, fs_dirs, extra_files=None, pkgs=()):
+def build_initramfs(dest, fs_dirs, extra_files=None, pkgs=(), comp="gzip"):
     """Alpine base tar + project overlay + user fs dirs (later wins) -> cpio.gz."""
-    tarp = os.path.join(CACHE, "alpine-minirootfs.tar.gz"); agent = os.path.join(CACHE, "qh-agent")
+    tarp = base_tar(); agent = os.path.join(CACHE, "qh-agent")
+    if pkgs and ARCH.get("userland") == "openwrt": die("`pkgs` resolves Alpine packages; for OpenWrt userlands put files in an fs/ dir instead")
     if not (os.path.exists(tarp) and os.path.exists(agent)): die("run `qh setup` first")
     ents = {}  # path -> (mode, data)
     with tarfile.open(tarp) as t:
@@ -292,7 +331,12 @@ def build_initramfs(dest, fs_dirs, extra_files=None, pkgs=()):
         _newc(buf, ino, p, e[0], e[1], rdev=e[2] if len(e) > 2 else (0, 0)); ino += 1
     _newc(buf, 0, "TRAILER!!!", 0)
     with open(dest, "wb") as f:
-        f.write(gzip.compress(buf.getvalue(), 1))
+        raw = buf.getvalue()
+        if comp == "gzip": f.write(gzip.compress(raw, 1))
+        elif comp == "lzma": import lzma; f.write(lzma.compress(raw, format=lzma.FORMAT_ALONE, preset=1))  # kernel's unlzma format
+        elif comp == "xz": import lzma; f.write(lzma.compress(raw, format=lzma.FORMAT_XZ, check=lzma.CHECK_CRC32, preset=1))
+        elif comp == "none": f.write(raw)
+        else: die(f"unknown initrd compression '{comp}' (gzip|lzma|xz|none)")
     return len(ents)
 
 
@@ -320,6 +364,9 @@ def pick_transport(cfg, kcfg):
         pci_ok = have("CONFIG_VIRTIO_PCI") and (cfg["arch"] == "x86_64" or have("CONFIG_PCI_HOST_GENERIC") or have("CONFIG_PCI_HOST_COMMON"))
         bus = "pci" if (pci_ok or unknown) else "mmio" if have("CONFIG_VIRTIO_MMIO") else None
     chan, nic = cfg["chan"], cfg["nic"]
+    if unknown:  # e.g. OpenWrt ELF kernels: use the arch's known-good wiring
+        if chan == "auto" and ARCH.get("chan_default"): chan = ARCH["chan_default"]
+        if nic == "auto" and ARCH.get("nic_default"): nic = ARCH["nic_default"]
     if chan == "auto":
         if bus and (have("CONFIG_VIRTIO_CONSOLE") or (unknown and mods)): chan = "virtio"
         elif cfg["chan_tty"] and cfg["chan_tty"] == ARCH.get("chan_tty") and (k.get("CONFIG_SERIAL_8250_PCI") == "y" or unknown): chan = "pci-serial"
@@ -334,9 +381,19 @@ def pick_transport(cfg, kcfg):
     return chan, nic, bus or "pci"
 
 
-def kernel_fetch(arch, flavor=None, force=False):
-    """Download Alpine's kernel package for ARCH -> (kernel path, modfs dir with the virtio/tun/9p module closure)."""
-    arch = norm_arch(arch); ensure_setup(arch); flavor = flavor or ARCH["kflavor"]
+def kernel_fetch(arch, flavor=None, force=False, vendor="alpine"):
+    """Download a known-good kernel for ARCH -> (kernel path, modfs dir | None).
+    alpine: Alpine's kernel package + the virtio/tun/9p module closure.  openwrt: the target's vmlinux (its modules ship in the rootfs)."""
+    arch = norm_arch(arch); ensure_setup(arch)
+    if ARCH.get("userland") == "openwrt" or vendor == "openwrt":
+        if ARCH.get("userland") != "openwrt": die(f"no OpenWrt userland known for {arch}; OpenWrt kernels are for: mips, mipsel")
+        kp = os.path.join(CACHE, "kernels", "openwrt", "kernel")
+        if not os.path.exists(kp) or force:
+            i = owrt_info(); os.makedirs(os.path.dirname(kp), exist_ok=True)
+            print("downloading", i["kernel"], file=sys.stderr); urllib.request.urlretrieve(i["base"] + i["kernel"], kp)
+        return kp, None
+    if not ARCH.get("kflavor"): die(f"no Alpine kernel for {arch}")
+    flavor = flavor or ARCH["kflavor"]
     kd = os.path.join(CACHE, "kernels", flavor); kp = os.path.join(kd, "kernel"); mfs = os.path.join(kd, "modfs")
     if os.path.exists(kp) and os.path.isdir(mfs) and not force: return kp, mfs
     br, prov = apk_index(); p = prov.get("linux-" + flavor) or die(f"no linux-{flavor} for {ARCH['alpine']}")
@@ -531,7 +588,7 @@ def b64d(x): return base64.b64decode(x) if x else b""
 def cmd_build(a):
     cfg = load_cfg(a); out = a.out or os.path.join(STATE, a.name, "rootfs.cpio.gz")
     os.makedirs(os.path.dirname(out), exist_ok=True)
-    t = time.time(); n = build_initramfs(out, cfg["fs"], pkgs=cfg.get("pkgs", []))
+    t = time.time(); n = build_initramfs(out, cfg["fs"], pkgs=cfg.get("pkgs", []), comp=cfg["initrd_comp"])
     print(f"built {out} ({n} entries, {os.path.getsize(out)//1024} KiB, {time.time()-t:.1f}s)")
 
 
@@ -583,8 +640,9 @@ def build_qemu_cmd(a, cfg, name, d, ports, chan, nic, bus, hostfwd, initrd):
     append = (f"{ARCH['cmdline']} rdinit=/init qh.net={cfg['net']} qh.hostname={name} qh.nic={nic} "
               f"qh.chan={'virtio' if chan == 'virtio' else tty} loglevel=4 ")
     if chan == "pci-serial": append += "8250.nr_uarts=4 "
+    if nic == ARCH.get("nic_default") and ARCH.get("nic_mods"): append += f"qh.mods={ARCH['nic_mods']} "
     append += cfg["append"]
-    q = [qemu_bin(), "-M", cfg["machine"], "-cpu", cfg["cpu"], "-m", cfg["mem"], "-smp", str(cfg["smp"]),
+    q = [qemu_bin(), "-M", cfg["machine"]] + (["-cpu", cfg["cpu"]] if cfg["cpu"] else []) + ["-m", cfg["mem"], "-smp", str(cfg["smp"]),
          "-kernel", kernel, "-append", append, "-display", "none", "-monitor", "none", "-name", name,
          "-chardev", f"socket,id=ser0,host=127.0.0.1,port={ports['serial_port']},server=on,wait=off,logfile={log}",
          "-serial", "chardev:ser0",
@@ -602,6 +660,8 @@ def build_qemu_cmd(a, cfg, name, d, ports, chan, nic, bus, hostfwd, initrd):
     user = "user,id=u0" + "".join(f",hostfwd={h}" for h in hostfwd)
     if nic == "native":
         q += ["-netdev", user, "-device", f"virtio-net-{dev},netdev=u0"]
+    elif nic not in ("tap", "none"):  # any QEMU NIC model (pcnet, e1000, rtl8139, ...) on the user-mode network
+        q += ["-netdev", user, "-device", f"{nic},netdev=u0"]
     elif nic == "tap":  # slirp <-> hub <-> stream socket <-> daemon <-> channel <-> guest tap
         q += ["-netdev", user, "-netdev", f"stream,id=s0,addr.type=inet,addr.host=127.0.0.1,addr.port={ports['net_port']},server=on",
               "-netdev", "hubport,id=h0,hubid=0,netdev=u0", "-netdev", "hubport,id=h1,hubid=0,netdev=s0"]
@@ -631,7 +691,7 @@ def launch(a, cfg, name, prev=None):
     initrd = cfg["initrd"]; tb = 0
     if not initrd:
         initrd = os.path.join(d, "rootfs.cpio.gz")
-        t = time.time(); build_initramfs(initrd, cfg["fs"], pkgs=cfg.get("pkgs", [])); tb = time.time() - t
+        t = time.time(); build_initramfs(initrd, cfg["fs"], pkgs=cfg.get("pkgs", []), comp=cfg["initrd_comp"]); tb = time.time() - t
     q = build_qemu_cmd(a, cfg, name, d, ports, chan, nic, bus, hostfwd, initrd)
     if getattr(a, "dry_run", False):
         print(" ".join(f'"{x}"' if " " in x else x for x in q)); print(f"# arch={cfg['arch']} chan={chan} nic={nic} bus={bus}"); sys.exit(0)
@@ -734,13 +794,13 @@ def cmd_probe(a):
 
 def cmd_kernel(a):
     if a.action == "fetch":
-        kp, mfs = kernel_fetch(a.arch, a.flavor, a.force); emit(a, {"kernel": kp, "modfs": mfs, "spec": f"alpine:{norm_arch(a.arch)}" + (f":{a.flavor}" if a.flavor else "")})
+        kp, mfs = kernel_fetch(a.arch, a.flavor, a.force); emit(a, {"kernel": kp, "modfs": mfs, "spec": f"{'openwrt' if ARCH.get('userland') == 'openwrt' else 'alpine'}:{norm_arch(a.arch)}" + (f":{a.flavor}" if a.flavor and not ARCH.get('userland') else "")})
 
 
 def cmd_dtb(a):
     """Dump the device tree QEMU generates for the machine (edit with dtc, feed back with --dtb)."""
     cfg = load_cfg(a); out = os.path.abspath(a.out)
-    q = [qemu_bin(), "-M", f"{cfg['machine']},dumpdtb={out}", "-cpu", cfg["cpu"], "-m", cfg["mem"], "-smp", str(cfg["smp"]), "-display", "none", "-serial", "null"]
+    q = [qemu_bin(), "-M", f"{cfg['machine']},dumpdtb={out}"] + (["-cpu", cfg["cpu"]] if cfg["cpu"] else []) + ["-m", cfg["mem"], "-smp", str(cfg["smp"]), "-display", "none", "-serial", "null"]
     r = subprocess.run(q, capture_output=True, text=True, creationflags=0x08000000 if os.name == "nt" else 0)
     if not os.path.exists(out): die("dumpdtb failed (machine without a DTB?):\n" + r.stderr[-600:])
     d = open(out, "rb").read()  # QEMU dumps a padded 1 MiB buffer: repack to the real size
@@ -911,8 +971,8 @@ def main():
         q.add_argument("--arch", help="aarch64|arm|riscv64|x86_64 (default: detected from the kernel image)")
         q.add_argument("--kernel", help="kernel file, or alpine:<arch>[:flavor] to use a fetched Alpine kernel + modules")
         q.add_argument("--initrd", help="your own initrd instead of the built rootfs (no agent unless it contains one; use --no-wait)")
-        q.add_argument("--bios"); q.add_argument("--chan", choices=["auto", "virtio", "pci-serial", "serial"]); q.add_argument("--nic", choices=["auto", "native", "tap", "none"])
-        q.add_argument("--bus", choices=["auto", "pci", "mmio"]); q.add_argument("--chan-tty", dest="chan_tty", help="guest tty of the agent UART, e.g. /dev/ttyAMA1")
+        q.add_argument("--bios"); q.add_argument("--chan", choices=["auto", "virtio", "pci-serial", "serial"]); q.add_argument("--nic", help="auto|native (virtio)|tap|none|<qemu NIC model, e.g. pcnet, e1000>")
+        q.add_argument("--initrd-comp", dest="initrd_comp", choices=["gzip", "lzma", "xz", "none"], help="initramfs compression the kernel supports (default per arch)"); q.add_argument("--bus", choices=["auto", "pci", "mmio"]); q.add_argument("--chan-tty", dest="chan_tty", help="guest tty of the agent UART, e.g. /dev/ttyAMA1")
         q.add_argument("--mem"); q.add_argument("--smp", type=int); q.add_argument("--machine")
         q.add_argument("--cpu"); q.add_argument("--append", help="extra kernel cmdline"); q.add_argument("--net", choices=["static", "dhcp", "none"])
         q.add_argument("--fs", action="append", help="overlay dir merged into rootfs (repeatable)")

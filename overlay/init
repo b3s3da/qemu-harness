@@ -4,7 +4,7 @@ export PATH=/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 mount -t proc proc /proc
 mount -t sysfs sys /sys
 mount -t devtmpfs dev /dev 2>/dev/null || DEVNODES=mdev  # GKI has no devtmpfs: populate /dev from sysfs
-[ "$DEVNODES" = mdev ] && mdev -s
+[ "$DEVNODES" = mdev ] && command -v mdev >/dev/null && mdev -s
 mkdir -p /dev/pts /dev/shm /tmp /run /mnt
 mount -t devpts devpts /dev/pts 2>/dev/null
 [ -c /dev/net/tun ] || { mkdir -p /dev/net; mknod /dev/net/tun c 10 200; }
@@ -15,15 +15,18 @@ mount -t tracefs none /sys/kernel/tracing 2>/dev/null
 
 cmd=$(cat /proc/cmdline)
 opt() { for w in $cmd; do case $w in "$1="*) echo "${w#*=}"; return;; esac; done; }
-HN=$(opt qh.hostname); hostname "${HN:-qh}"
+HN=$(opt qh.hostname); hostname "${HN:-qh}" 2>/dev/null || echo "${HN:-qh}" > /proc/sys/kernel/hostname
 NET=$(opt qh.net)
 
-# kernel modules: a full tree (lib/modules/<ver>/modules.dep) goes through modprobe, loose *.ko files are insmod'ed in order
-MODS=$(opt qh.mods)
-if [ -f "/lib/modules/$(uname -r)/modules.dep" ]; then
+# kernel modules: modules.dep tree -> modprobe; bare /lib/modules/<ver>/*.ko (OpenWrt style) -> insmod the names in qh.mods;
+# loose /lib/modules/*.ko -> insmod in modules.order
+MODS=$(opt qh.mods); KV=$(uname -r)
+if [ -f "/lib/modules/$KV/modules.dep" ]; then
   for m in $(echo "${MODS:-virtio_pci,virtio_mmio,virtio_console,virtio_net,virtio_blk,virtio_rng,9pnet_virtio,9p,tun}" | tr , ' '); do
     modprobe "$m" 2>/dev/null
   done
+elif [ -n "$MODS" ] && [ -d "/lib/modules/$KV" ]; then
+  for m in $(echo "$MODS" | tr , ' '); do insmod "/lib/modules/$KV/$m.ko" 2>&1; done
 elif [ -d /lib/modules ]; then
   if [ -f /lib/modules/modules.order ]; then
     while read m; do [ -f "/lib/modules/$m" ] && insmod "/lib/modules/$m" 2>&1; done < /lib/modules/modules.order
@@ -32,7 +35,7 @@ elif [ -d /lib/modules ]; then
   fi
 fi
 
-[ "$DEVNODES" = mdev ] && mdev -s
+[ "$DEVNODES" = mdev ] && command -v mdev >/dev/null && mdev -s
 
 # agent first: in tap mode it also creates eth0 (frames tunnelled to the host over the channel)
 CHAN=$(opt qh.chan); NIC=$(opt qh.nic)

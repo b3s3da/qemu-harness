@@ -12,7 +12,7 @@
                (3) builds the guest agent + fetches guest userland   (4) adds qh to your user PATH
                (5) installs the agent skill for Claude Code and Grok   (6) optional smoke test
 
- Options: -Yes (no prompts)  -Arch aarch64|arm|riscv64|x86_64|all  -Dir PATH  -Repo owner/name  -Ref branch-or-tag  -BaseUrl mirror
+ Options: -Yes (no prompts)  -Arch aarch64|arm|riscv64|x86_64|mipsel|mips|all  -Dir PATH  -Repo owner/name  -Ref branch-or-tag  -BaseUrl mirror
           -NoDeps (never call winget)  -NoPath  -NoSkills  -Smoke
 #>
 param(
@@ -53,8 +53,8 @@ else {
 }
 
 # ---------------------------------------------------------------- 2. dependencies
-$archs = @(if ($Arch -eq "all") { "aarch64","arm","riscv64","x86_64" } else { $Arch })
-$qnames = @{ aarch64="qemu-system-aarch64"; arm="qemu-system-arm"; riscv64="qemu-system-riscv64"; x86_64="qemu-system-x86_64" }
+$archs = @(if ($Arch -eq "all") { "aarch64","arm","riscv64","x86_64","mipsel","mips" } else { $Arch })
+$qnames = @{ aarch64="qemu-system-aarch64"; arm="qemu-system-arm"; riscv64="qemu-system-riscv64"; x86_64="qemu-system-x86_64"; mipsel="qemu-system-mipsel"; mips="qemu-system-mips" }
 foreach ($a in $archs) { if (-not $qnames.ContainsKey($a)) { Fail "unknown arch '$a'" } }
 $winget = Get-Command winget -ErrorAction SilentlyContinue
 

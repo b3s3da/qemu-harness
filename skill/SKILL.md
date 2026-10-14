@@ -1,6 +1,6 @@
 ---
 name: qemu-harness
-description: Boot and drive QEMU guests (aarch64, arm32, riscv64, x86_64 kernels, IoT firmware) through the `qh` CLI - run commands in the guest, copy files, rebuild the rootfs overlay, change kernel/dtb/machine/memory, forward ports, read the serial console. Use when asked to run, test, debug or emulate a kernel or IoT device.
+description: Boot and drive QEMU guests (aarch64, arm32, riscv64, x86_64, MIPS kernels, IoT firmware) through the `qh` CLI - run commands in the guest, copy files, rebuild the rootfs overlay, change kernel/dtb/machine/memory, forward ports, read the serial console. Use when asked to run, test, debug or emulate a kernel or IoT device.
 ---
 
 `qh` is on PATH (installed by the harness's install script; otherwise `python <harness>/qh.py`).
@@ -9,7 +9,7 @@ In Git Bash on Windows set `MSYS_NO_PATHCONV=1` so guest paths like `/tmp/x` are
 
 Loop:
 1. `qh up --kernel <file>` (arch is detected from the image; `--arch` to force). No kernel of your own? `--kernel alpine:arm` /
-   `alpine:riscv64` / `alpine:x86_64` / `alpine:aarch64` fetches a known-good one. First run per arch: `qh setup --arch <a>` (needs Go).
+   `alpine:riscv64` / `alpine:x86_64` / `alpine:aarch64` fetches a known-good one; MIPS (routers/cameras): `--kernel openwrt:mipsel` or `openwrt:mips` (OpenWrt/musl base; put firmware files in `fs/`, `pkgs` is Alpine-only). First run per arch: `qh setup --arch <a>` (needs Go).
 2. `qh exec --json 'cmd'` -> {exit, stdout, stderr}. `--timeout N`; `--bg` for daemons (log path returned).
 3. Guest files: put under `fs/` (mirrors guest `/`) then `qh reload` (~3 s). Alpine packages: list in `pkgs` of qh.json (or `--pkg`).
    `put`/`get` are for small files only (slow serial link on kernels without virtio-net).

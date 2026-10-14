@@ -14,6 +14,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -365,6 +366,8 @@ func doExec(r Req) {
 	if err != nil {
 		if ee, ok := err.(*exec.ExitError); ok {
 			code = ee.ExitCode()
+		} else if errors.Is(err, exec.ErrWaitDelay) && c.ProcessState != nil {
+			code = c.ProcessState.ExitCode() // a daemonised child kept the pipes open; the command itself finished
 		} else {
 			fail(r.ID, err)
 			return

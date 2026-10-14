@@ -2,7 +2,7 @@
 
 Boot a bare kernel image (or a ready-made Alpine one) in seconds, talk to it through an in-guest bridge agent
 (think `qemu-guest-agent`, but tiny and kernel-agnostic), get networking, and rebuild the root filesystem in a fraction of a second.
-Built for **IoT / embedded kernel emulation**: aarch64, arm32, riscv64 and x86_64 guests, any machine/DTB/cmdline you throw at it.
+Built for **IoT / embedded kernel emulation**: aarch64, arm32, riscv64, x86_64 and MIPS (mipsel / mips, OpenWrt malta) guests, any machine/DTB/cmdline you throw at it.
 
 * `qh up` → VM ready (agent answering) in ~2–5 s, `qh exec 'cmd'` → stdout/stderr/exit code as JSON.
 * Rootfs = Alpine userland + your overlay dirs, packed into an initramfs on the host in ~0.3 s (`qh reload`). No root, no WSL, no mounts.
@@ -75,6 +75,23 @@ Every key has a CLI flag (`--arch --kernel --initrd --bios --machine --cpu --mem
 * **Packages**: names in `pkgs` are resolved against Alpine's index (deps included) and unpacked on the host — no `apk` needed.
 * **Kernel modules**: ship a full tree (`lib/modules/<ver>/modules.dep`, uncompressed `.ko`) and init `modprobe`s virtio/tun/9p; loose `*.ko` + `modules.order` are `insmod`ed.
 * The bundled overlay starts dropbear (root, empty password — lab only!), mosquitto, and httpd.
+
+## MIPS (routers, cameras)
+
+`--arch mipsel` / `--arch mips` (or just a MIPS ELF kernel) use **OpenWrt malta** as the base: musl + busybox, the closest match to router/camera
+firmware, and a ready-made kernel + rootfs (there is no Alpine for MIPS and Debian dropped mipsel).
+
+```powershell
+qh setup --arch mipsel                       # OpenWrt rootfs + softfloat Go agent
+qh up --kernel openwrt:mipsel                # little-endian (or openwrt:mips for big-endian)
+qh exec 'uname -m; ldd --version 2>&1 | head -1'
+```
+
+How it is wired (all overridable): machine `malta`, NIC `pcnet` (emulated, driver `pcnet32.ko` ships in the rootfs and is insmod'ed from
+`/lib/modules/<ver>/`), agent on the **second UART** (`/dev/ttyS1`, `--chan serial --chan-tty`), initramfs **uncompressed** (that kernel has no
+gzip/lzma initramfs decoder; `--initrd-comp`). The kernel is OpenWrt's `-vmlinux-initramfs.elf` because only that build has `BLK_DEV_INITRD`.
+Your firmware's userland goes into an `fs/` dir as usual; it runs on OpenWrt's 6.x kernel, so check that it is musl or statically linked
+(a glibc `/lib` laid over a musl rootfs breaks the init). `pkgs` is Alpine-only; for OpenWrt put files in `fs/`.
 
 ## How it works
 
